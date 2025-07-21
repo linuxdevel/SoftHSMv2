@@ -194,6 +194,13 @@ void AsymEncryptDecryptTests::rsaOAEPParams(CK_SESSION_HANDLE hSession, CK_OBJEC
 	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
 	CPPUNIT_ASSERT(rv==CKR_OK); // SHA-256 MGF is now supported
 
+	// Complete the encryption operation to reset the session state
+	CK_BYTE plainText[32] = "Test data for encryption";
+	CK_BYTE cipherText[256];
+	CK_ULONG ulCipherTextLen = sizeof(cipherText);
+	rv = CRYPTOKI_F_PTR( C_Encrypt(hSession, plainText, sizeof(plainText), cipherText, &ulCipherTextLen) );
+	CPPUNIT_ASSERT(rv==CKR_OK);
+
 	oaepParams.mgf = CKG_MGF1_SHA1;
 	oaepParams.source = CKZ_DATA_SPECIFIED - 1;
 	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
