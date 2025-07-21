@@ -1,0 +1,1 @@
+Added support for all RSA OAEP hashing algo's from SHA-224 to SHA-512
