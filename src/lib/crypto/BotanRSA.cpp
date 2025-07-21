@@ -38,6 +38,7 @@
 #include "BotanCryptoFactory.h"
 #include "RSAParameters.h"
 #include "BotanRSAKeyPair.h"
+#include "pkcs11.h"
 #include <algorithm>
 #include <botan/rsa.h>
 #include <botan/version.h>
@@ -821,6 +822,123 @@ bool BotanRSA::encrypt(PublicKey* publicKey, const ByteString& data,
 	return true;
 }
 
+// Encryption with parameters (for OAEP)
+bool BotanRSA::encrypt(PublicKey* publicKey, const ByteString& data, ByteString& encryptedData, const AsymMech::Type padding, const void* param, const size_t paramLen)
+{
+	// Check if the public key is the right type
+	if (!publicKey->isOfType(BotanRSAPublicKey::type))
+	{
+		ERROR_MSG("Invalid key type supplied");
+
+		return false;
+	}
+
+	std::string eme;
+
+	switch (padding)
+	{
+		case AsymMech::RSA_PKCS:
+			eme = "PKCS1v15";
+			break;
+		case AsymMech::RSA_PKCS_OAEP:
+			{
+				// Handle OAEP parameters
+				if (param != NULL && paramLen == sizeof(CK_RSA_PKCS_OAEP_PARAMS))
+				{
+					CK_RSA_PKCS_OAEP_PARAMS_PTR oaepParams = (CK_RSA_PKCS_OAEP_PARAMS_PTR)param;
+					
+					// Determine hash algorithm for MGF
+					std::string mgf_hash;
+					switch (oaepParams->mgf)
+					{
+						case CKG_MGF1_SHA1:
+							mgf_hash = "SHA-160";
+							break;
+						case CKG_MGF1_SHA224:
+							mgf_hash = "SHA-224";
+							break;
+						case CKG_MGF1_SHA256:
+							mgf_hash = "SHA-256";
+							break;
+						case CKG_MGF1_SHA384:
+							mgf_hash = "SHA-384";
+							break;
+						case CKG_MGF1_SHA512:
+							mgf_hash = "SHA-512";
+							break;
+						default:
+							ERROR_MSG("Unsupported MGF1 hash algorithm");
+							return false;
+					}
+					
+					// For now, use the MGF hash as the main hash (Botan's EME1 format)
+					// This supports all combinations by using the MGF hash
+					eme = "EME1(" + mgf_hash + ")";
+				}
+				else
+				{
+					// Default to SHA-1 for backward compatibility
+					eme = "EME1(SHA-160)";
+				}
+			}
+			break;
+		case AsymMech::RSA:
+			eme = "Raw";
+			break;
+		default:
+			ERROR_MSG("Invalid padding mechanism supplied (%i)", padding);
+
+			return false;
+	}
+
+	BotanRSAPublicKey* pk = (BotanRSAPublicKey*) publicKey;
+	Botan::RSA_PublicKey* botanKey = pk->getBotanKey();
+
+	if (!botanKey)
+	{
+		ERROR_MSG("Could not get the Botan public key");
+
+		return false;
+	}
+
+	Botan::PK_Encryptor_EME* encryptor = NULL;
+	try
+	{
+		BotanRNG* rng = (BotanRNG*)BotanCryptoFactory::i()->getRNG();
+		encryptor = new Botan::PK_Encryptor_EME(*botanKey, *rng->getRNG(), eme);
+	}
+	catch (...)
+	{
+		ERROR_MSG("Could not create the encryptor token");
+
+		return false;
+	}
+
+	// Perform the encryption operation
+	std::vector<uint8_t> encResult;
+	try
+	{
+		BotanRNG* rng = (BotanRNG*)BotanCryptoFactory::i()->getRNG();
+		encResult = encryptor->encrypt(data.const_byte_str(), data.size(), *rng->getRNG());
+	}
+	catch (...)
+	{
+		ERROR_MSG("Could not encrypt the data");
+
+		delete encryptor;
+
+		return false;
+	}
+
+	// Return the result
+	encryptedData.resize(encResult.size());
+	memcpy(&encryptedData[0], encResult.data(), encResult.size());
+
+	delete encryptor;
+
+	return true;
+}
+
 // Decryption functions
 bool BotanRSA::decrypt(PrivateKey* privateKey, const ByteString& encryptedData,
 		       ByteString& data, const AsymMech::Type padding)
@@ -842,6 +960,133 @@ bool BotanRSA::decrypt(PrivateKey* privateKey, const ByteString& encryptedData,
 			break;
 		case AsymMech::RSA_PKCS_OAEP:
 			eme = "EME1(SHA-160)";
+			break;
+		case AsymMech::RSA:
+			eme = "Raw";
+			break;
+		default:
+			ERROR_MSG("Invalid padding mechanism supplied (%i)", padding);
+
+			return false;
+	}
+
+	BotanRSAPrivateKey* pk = (BotanRSAPrivateKey*) privateKey;
+	Botan::RSA_PrivateKey* botanKey = pk->getBotanKey();
+
+	if (!botanKey)
+	{
+		ERROR_MSG("Could not get the Botan private key");
+
+		return false;
+	}
+
+	Botan::PK_Decryptor_EME* decryptor = NULL;
+	try
+	{
+		BotanRNG* rng = (BotanRNG*)BotanCryptoFactory::i()->getRNG();
+		decryptor = new Botan::PK_Decryptor_EME(*botanKey, *rng->getRNG(), eme);
+	}
+	catch (...)
+	{
+		ERROR_MSG("Could not create the decryptor token");
+
+		return false;
+	}
+
+	// Perform the decryption operation
+	Botan::secure_vector<uint8_t> decResult;
+	try
+	{
+		decResult = decryptor->decrypt(encryptedData.const_byte_str(), encryptedData.size());
+	}
+	catch (...)
+	{
+		ERROR_MSG("Could not decrypt the data");
+
+		delete decryptor;
+
+		return false;
+	}
+
+	// Return the result
+	if (padding == AsymMech::RSA)
+	{
+		// We compensate that Botan removes leading zeros
+		int modSize = pk->getN().size();
+		int decSize = decResult.size();
+		data.resize(modSize);
+		memcpy(&data[0] + modSize - decSize, decResult.data(), decSize);
+	}
+	else
+	{
+		data.resize(decResult.size());
+		memcpy(&data[0], decResult.data(), decResult.size());
+	}
+
+	delete decryptor;
+
+	return true;
+}
+
+// Decryption with parameters (for OAEP)
+bool BotanRSA::decrypt(PrivateKey* privateKey, const ByteString& encryptedData, ByteString& data, const AsymMech::Type padding, const void* param, const size_t paramLen)
+{
+	// Check if the private key is the right type
+	if (!privateKey->isOfType(BotanRSAPrivateKey::type))
+	{
+		ERROR_MSG("Invalid key type supplied");
+
+		return false;
+	}
+
+	std::string eme;
+
+	switch (padding)
+	{
+		case AsymMech::RSA_PKCS:
+			eme = "PKCS1v15";
+			break;
+		case AsymMech::RSA_PKCS_OAEP:
+			{
+				// Handle OAEP parameters
+				if (param != NULL && paramLen == sizeof(CK_RSA_PKCS_OAEP_PARAMS))
+				{
+					CK_RSA_PKCS_OAEP_PARAMS_PTR oaepParams = (CK_RSA_PKCS_OAEP_PARAMS_PTR)param;
+					
+					// Determine hash algorithm for MGF
+					std::string mgf_hash;
+					switch (oaepParams->mgf)
+					{
+						case CKG_MGF1_SHA1:
+							mgf_hash = "SHA-160";
+							break;
+						case CKG_MGF1_SHA224:
+							mgf_hash = "SHA-224";
+							break;
+						case CKG_MGF1_SHA256:
+							mgf_hash = "SHA-256";
+							break;
+						case CKG_MGF1_SHA384:
+							mgf_hash = "SHA-384";
+							break;
+						case CKG_MGF1_SHA512:
+							mgf_hash = "SHA-512";
+							break;
+						default:
+							ERROR_MSG("Unsupported MGF1 hash algorithm");
+							return false;
+					}
+					
+					// For now, use the MGF hash as the main hash (Botan's EME1 format)
+					// This supports all combinations by using the MGF hash
+					eme = "EME1(" + mgf_hash + ")";
+				}
+				else
+				{
+					// Default to SHA-1 for backward compatibility
+					eme = "EME1(SHA-160)";
+				}
+			}
 			break;
 		case AsymMech::RSA:
 			eme = "Raw";

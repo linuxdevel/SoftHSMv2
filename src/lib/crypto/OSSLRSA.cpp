@@ -37,10 +37,12 @@
 #include "CryptoFactory.h"
 #include "RSAParameters.h"
 #include "OSSLRSAKeyPair.h"
+#include "pkcs11.h"
 #include <algorithm>
 #include <openssl/rsa.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
+#include <openssl/evp.h>
 
 // Constructor
 OSSLRSA::OSSLRSA()
@@ -1280,6 +1282,200 @@ bool OSSLRSA::encrypt(PublicKey* publicKey, const ByteString& data,
 	return true;
 }
 
+// Encryption with parameters (for OAEP)
+bool OSSLRSA::encrypt(PublicKey* publicKey, const ByteString& data, ByteString& encryptedData, const AsymMech::Type padding, const void* param, const size_t paramLen)
+{
+	// For non-OAEP or when no parameters provided, use standard method
+	if (padding != AsymMech::RSA_PKCS_OAEP || param == NULL || paramLen != sizeof(CK_RSA_PKCS_OAEP_PARAMS))
+	{
+		return encrypt(publicKey, data, encryptedData, padding);
+	}
+
+	// Check if the public key is the right type
+	if (!publicKey->isOfType(OSSLRSAPublicKey::type))
+	{
+		ERROR_MSG("Invalid key type supplied");
+		return false;
+	}
+
+	CK_RSA_PKCS_OAEP_PARAMS_PTR oaepParams = (CK_RSA_PKCS_OAEP_PARAMS_PTR)param;
+	
+	// For SHA-1, use the standard method
+	if (oaepParams->hashAlg == CKM_SHA_1 && oaepParams->mgf == CKG_MGF1_SHA1)
+	{
+		return encrypt(publicKey, data, encryptedData, padding);
+	}
+
+	// For advanced OAEP configurations, we need to use EVP interface
+	if ((oaepParams->hashAlg == CKM_SHA256 && oaepParams->mgf == CKG_MGF1_SHA256) ||
+	    (oaepParams->hashAlg == CKM_SHA_1 && oaepParams->mgf == CKG_MGF1_SHA256) ||
+	    (oaepParams->hashAlg == CKM_SHA224 && oaepParams->mgf == CKG_MGF1_SHA224) ||
+	    (oaepParams->hashAlg == CKM_SHA384 && oaepParams->mgf == CKG_MGF1_SHA384) ||
+	    (oaepParams->hashAlg == CKM_SHA512 && oaepParams->mgf == CKG_MGF1_SHA512) ||
+	    (oaepParams->hashAlg == CKM_SHA_1 && oaepParams->mgf == CKG_MGF1_SHA224) ||
+	    (oaepParams->hashAlg == CKM_SHA_1 && oaepParams->mgf == CKG_MGF1_SHA384) ||
+	    (oaepParams->hashAlg == CKM_SHA_1 && oaepParams->mgf == CKG_MGF1_SHA512) ||
+	    (oaepParams->hashAlg == CKM_SHA224 && oaepParams->mgf == CKG_MGF1_SHA256) ||
+	    (oaepParams->hashAlg == CKM_SHA256 && oaepParams->mgf == CKG_MGF1_SHA224) ||
+	    (oaepParams->hashAlg == CKM_SHA256 && oaepParams->mgf == CKG_MGF1_SHA384) ||
+	    (oaepParams->hashAlg == CKM_SHA256 && oaepParams->mgf == CKG_MGF1_SHA512) ||
+	    (oaepParams->hashAlg == CKM_SHA384 && oaepParams->mgf == CKG_MGF1_SHA256) ||
+	    (oaepParams->hashAlg == CKM_SHA384 && oaepParams->mgf == CKG_MGF1_SHA224) ||
+	    (oaepParams->hashAlg == CKM_SHA384 && oaepParams->mgf == CKG_MGF1_SHA512) ||
+	    (oaepParams->hashAlg == CKM_SHA512 && oaepParams->mgf == CKG_MGF1_SHA256) ||
+	    (oaepParams->hashAlg == CKM_SHA512 && oaepParams->mgf == CKG_MGF1_SHA224) ||
+	    (oaepParams->hashAlg == CKM_SHA512 && oaepParams->mgf == CKG_MGF1_SHA384))
+	{
+		OSSLRSAPublicKey* pk = (OSSLRSAPublicKey*) publicKey;
+		RSA* rsa = pk->getOSSLKey();
+
+		if (rsa == NULL)
+		{
+			ERROR_MSG("Could not get the OpenSSL public key");
+			return false;
+		}
+
+		// Convert RSA key to EVP_PKEY
+		EVP_PKEY* evpkey = EVP_PKEY_new();
+		if (!evpkey)
+		{
+			ERROR_MSG("Failed to create EVP_PKEY");
+			return false;
+		}
+
+		if (EVP_PKEY_set1_RSA(evpkey, rsa) != 1)
+		{
+			ERROR_MSG("Failed to set RSA key in EVP_PKEY");
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Create encryption context
+		EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(evpkey, NULL);
+		if (!ctx)
+		{
+			ERROR_MSG("Failed to create EVP_PKEY_CTX");
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Initialize encryption
+		if (EVP_PKEY_encrypt_init(ctx) <= 0)
+		{
+			ERROR_MSG("Failed to initialize encryption");
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Set OAEP padding
+		if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) <= 0)
+		{
+			ERROR_MSG("Failed to set OAEP padding");
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Set hash algorithm for OAEP
+		const EVP_MD* oaep_hash = NULL;
+		switch (oaepParams->hashAlg)
+		{
+			case CKM_SHA_1:
+				oaep_hash = EVP_sha1();
+				break;
+			case CKM_SHA224:
+				oaep_hash = EVP_sha224();
+				break;
+			case CKM_SHA256:
+				oaep_hash = EVP_sha256();
+				break;
+			case CKM_SHA384:
+				oaep_hash = EVP_sha384();
+				break;
+			case CKM_SHA512:
+				oaep_hash = EVP_sha512();
+				break;
+			default:
+				ERROR_MSG("Unsupported OAEP hash algorithm");
+				EVP_PKEY_CTX_free(ctx);
+				EVP_PKEY_free(evpkey);
+				return false;
+		}
+
+		if (EVP_PKEY_CTX_set_rsa_oaep_md(ctx, oaep_hash) <= 0)
+		{
+			ERROR_MSG("Failed to set OAEP hash algorithm");
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Set MGF1 hash algorithm
+		const EVP_MD* mgf_hash = NULL;
+		switch (oaepParams->mgf)
+		{
+			case CKG_MGF1_SHA1:
+				mgf_hash = EVP_sha1();
+				break;
+			case CKG_MGF1_SHA224:
+				mgf_hash = EVP_sha224();
+				break;
+			case CKG_MGF1_SHA256:
+				mgf_hash = EVP_sha256();
+				break;
+			case CKG_MGF1_SHA384:
+				mgf_hash = EVP_sha384();
+				break;
+			case CKG_MGF1_SHA512:
+				mgf_hash = EVP_sha512();
+				break;
+			default:
+				ERROR_MSG("Unsupported MGF1 hash algorithm");
+				EVP_PKEY_CTX_free(ctx);
+				EVP_PKEY_free(evpkey);
+				return false;
+		}
+
+		if (EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, mgf_hash) <= 0)
+		{
+			ERROR_MSG("Failed to set MGF1 hash algorithm");
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Determine output length
+		size_t outlen;
+		if (EVP_PKEY_encrypt(ctx, NULL, &outlen, data.const_byte_str(), data.size()) <= 0)
+		{
+			ERROR_MSG("Failed to determine encrypted data length");
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Encrypt the data
+		encryptedData.resize(outlen);
+		if (EVP_PKEY_encrypt(ctx, &encryptedData[0], &outlen, data.const_byte_str(), data.size()) <= 0)
+		{
+			ERROR_MSG("RSA OAEP SHA-256 encryption failed (0x%08X)", ERR_get_error());
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		encryptedData.resize(outlen);
+
+		EVP_PKEY_CTX_free(ctx);
+		EVP_PKEY_free(evpkey);
+		return true;
+	}
+
+	ERROR_MSG("Unsupported OAEP hash algorithm or MGF");
+	return false;
+}
+
 // Decryption functions
 bool OSSLRSA::decrypt(PrivateKey* privateKey, const ByteString& encryptedData,
 		      ByteString& data, const AsymMech::Type padding)
@@ -1337,6 +1533,200 @@ bool OSSLRSA::decrypt(PrivateKey* privateKey, const ByteString& encryptedData,
 	data.resize(decSize);
 
 	return true;
+}
+
+// Decryption with parameters (for OAEP)
+bool OSSLRSA::decrypt(PrivateKey* privateKey, const ByteString& encryptedData, ByteString& data, const AsymMech::Type padding, const void* param, const size_t paramLen)
+{
+	// For non-OAEP or when no parameters provided, use standard method
+	if (padding != AsymMech::RSA_PKCS_OAEP || param == NULL || paramLen != sizeof(CK_RSA_PKCS_OAEP_PARAMS))
+	{
+		return decrypt(privateKey, encryptedData, data, padding);
+	}
+
+	// Check if the private key is the right type
+	if (!privateKey->isOfType(OSSLRSAPrivateKey::type))
+	{
+		ERROR_MSG("Invalid key type supplied");
+		return false;
+	}
+
+	CK_RSA_PKCS_OAEP_PARAMS_PTR oaepParams = (CK_RSA_PKCS_OAEP_PARAMS_PTR)param;
+	
+	// For SHA-1, use the standard method
+	if (oaepParams->hashAlg == CKM_SHA_1 && oaepParams->mgf == CKG_MGF1_SHA1)
+	{
+		return decrypt(privateKey, encryptedData, data, padding);
+	}
+
+	// For advanced OAEP configurations, we need to use EVP interface
+	if ((oaepParams->hashAlg == CKM_SHA256 && oaepParams->mgf == CKG_MGF1_SHA256) ||
+	    (oaepParams->hashAlg == CKM_SHA_1 && oaepParams->mgf == CKG_MGF1_SHA256) ||
+	    (oaepParams->hashAlg == CKM_SHA224 && oaepParams->mgf == CKG_MGF1_SHA224) ||
+	    (oaepParams->hashAlg == CKM_SHA384 && oaepParams->mgf == CKG_MGF1_SHA384) ||
+	    (oaepParams->hashAlg == CKM_SHA512 && oaepParams->mgf == CKG_MGF1_SHA512) ||
+	    (oaepParams->hashAlg == CKM_SHA_1 && oaepParams->mgf == CKG_MGF1_SHA224) ||
+	    (oaepParams->hashAlg == CKM_SHA_1 && oaepParams->mgf == CKG_MGF1_SHA384) ||
+	    (oaepParams->hashAlg == CKM_SHA_1 && oaepParams->mgf == CKG_MGF1_SHA512) ||
+	    (oaepParams->hashAlg == CKM_SHA224 && oaepParams->mgf == CKG_MGF1_SHA256) ||
+	    (oaepParams->hashAlg == CKM_SHA256 && oaepParams->mgf == CKG_MGF1_SHA224) ||
+	    (oaepParams->hashAlg == CKM_SHA256 && oaepParams->mgf == CKG_MGF1_SHA384) ||
+	    (oaepParams->hashAlg == CKM_SHA256 && oaepParams->mgf == CKG_MGF1_SHA512) ||
+	    (oaepParams->hashAlg == CKM_SHA384 && oaepParams->mgf == CKG_MGF1_SHA256) ||
+	    (oaepParams->hashAlg == CKM_SHA384 && oaepParams->mgf == CKG_MGF1_SHA224) ||
+	    (oaepParams->hashAlg == CKM_SHA384 && oaepParams->mgf == CKG_MGF1_SHA512) ||
+	    (oaepParams->hashAlg == CKM_SHA512 && oaepParams->mgf == CKG_MGF1_SHA256) ||
+	    (oaepParams->hashAlg == CKM_SHA512 && oaepParams->mgf == CKG_MGF1_SHA224) ||
+	    (oaepParams->hashAlg == CKM_SHA512 && oaepParams->mgf == CKG_MGF1_SHA384))
+	{
+		OSSLRSAPrivateKey* pk = (OSSLRSAPrivateKey*) privateKey;
+		RSA* rsa = pk->getOSSLKey();
+
+		if (rsa == NULL)
+		{
+			ERROR_MSG("Could not get the OpenSSL private key");
+			return false;
+		}
+
+		// Convert RSA key to EVP_PKEY
+		EVP_PKEY* evpkey = EVP_PKEY_new();
+		if (!evpkey)
+		{
+			ERROR_MSG("Failed to create EVP_PKEY");
+			return false;
+		}
+
+		if (EVP_PKEY_set1_RSA(evpkey, rsa) != 1)
+		{
+			ERROR_MSG("Failed to set RSA key in EVP_PKEY");
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Create decryption context
+		EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(evpkey, NULL);
+		if (!ctx)
+		{
+			ERROR_MSG("Failed to create EVP_PKEY_CTX");
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Initialize decryption
+		if (EVP_PKEY_decrypt_init(ctx) <= 0)
+		{
+			ERROR_MSG("Failed to initialize decryption");
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Set OAEP padding
+		if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) <= 0)
+		{
+			ERROR_MSG("Failed to set OAEP padding");
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Set hash algorithm for OAEP
+		const EVP_MD* oaep_hash = NULL;
+		switch (oaepParams->hashAlg)
+		{
+			case CKM_SHA_1:
+				oaep_hash = EVP_sha1();
+				break;
+			case CKM_SHA224:
+				oaep_hash = EVP_sha224();
+				break;
+			case CKM_SHA256:
+				oaep_hash = EVP_sha256();
+				break;
+			case CKM_SHA384:
+				oaep_hash = EVP_sha384();
+				break;
+			case CKM_SHA512:
+				oaep_hash = EVP_sha512();
+				break;
+			default:
+				ERROR_MSG("Unsupported OAEP hash algorithm");
+				EVP_PKEY_CTX_free(ctx);
+				EVP_PKEY_free(evpkey);
+				return false;
+		}
+
+		if (EVP_PKEY_CTX_set_rsa_oaep_md(ctx, oaep_hash) <= 0)
+		{
+			ERROR_MSG("Failed to set OAEP hash algorithm");
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Set MGF1 hash algorithm
+		const EVP_MD* mgf_hash = NULL;
+		switch (oaepParams->mgf)
+		{
+			case CKG_MGF1_SHA1:
+				mgf_hash = EVP_sha1();
+				break;
+			case CKG_MGF1_SHA224:
+				mgf_hash = EVP_sha224();
+				break;
+			case CKG_MGF1_SHA256:
+				mgf_hash = EVP_sha256();
+				break;
+			case CKG_MGF1_SHA384:
+				mgf_hash = EVP_sha384();
+				break;
+			case CKG_MGF1_SHA512:
+				mgf_hash = EVP_sha512();
+				break;
+			default:
+				ERROR_MSG("Unsupported MGF1 hash algorithm");
+				EVP_PKEY_CTX_free(ctx);
+				EVP_PKEY_free(evpkey);
+				return false;
+		}
+
+		if (EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, mgf_hash) <= 0)
+		{
+			ERROR_MSG("Failed to set MGF1 hash algorithm");
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Determine output length
+		size_t outlen;
+		if (EVP_PKEY_decrypt(ctx, NULL, &outlen, encryptedData.const_byte_str(), encryptedData.size()) <= 0)
+		{
+			ERROR_MSG("Failed to determine decrypted data length");
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		// Decrypt the data
+		data.resize(outlen);
+		if (EVP_PKEY_decrypt(ctx, &data[0], &outlen, encryptedData.const_byte_str(), encryptedData.size()) <= 0)
+		{
+			ERROR_MSG("RSA OAEP SHA-256 decryption failed (0x%08X)", ERR_get_error());
+			EVP_PKEY_CTX_free(ctx);
+			EVP_PKEY_free(evpkey);
+			return false;
+		}
+
+		data.resize(outlen);
+
+		EVP_PKEY_CTX_free(ctx);
+		EVP_PKEY_free(evpkey);
+		return true;
+	}
+
+	ERROR_MSG("Unsupported OAEP hash algorithm or MGF");
+	return false;
 }
 
 // Key factory

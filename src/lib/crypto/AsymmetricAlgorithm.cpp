@@ -172,6 +172,19 @@ bool AsymmetricAlgorithm::unwrapKey(PrivateKey* privateKey, const ByteString& en
 	return decrypt(privateKey, encryptedData, data, padding);
 }
 
+// Encryption/Decryption with parameters (default implementations call original methods)
+bool AsymmetricAlgorithm::encrypt(PublicKey* publicKey, const ByteString& data, ByteString& encryptedData, const AsymMech::Type padding, const void* param, const size_t paramLen)
+{
+	// Default implementation ignores parameters for backward compatibility
+	return encrypt(publicKey, data, encryptedData, padding);
+}
+
+bool AsymmetricAlgorithm::decrypt(PrivateKey* privateKey, const ByteString& encryptedData, ByteString& data, const AsymMech::Type padding, const void* param, const size_t paramLen)
+{
+	// Default implementation ignores parameters for backward compatibility
+	return decrypt(privateKey, encryptedData, data, padding);
+}
+
 
 bool AsymmetricAlgorithm::generateParameters(AsymmetricParameters** /*ppParams*/, void* /*parameters = NULL*/, RNG* /*rng = NULL*/)
 {

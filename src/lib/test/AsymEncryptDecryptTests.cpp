@@ -116,6 +116,58 @@ void AsymEncryptDecryptTests::rsaEncryptDecrypt(CK_MECHANISM_TYPE mechanismType,
 	CPPUNIT_ASSERT(memcmp(plainText, &recoveredText[ulRecoveredTextLen-sizeof(plainText)], sizeof(plainText)) == 0);
 }
 
+void AsymEncryptDecryptTests::rsaOAEPSHA256(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPublicKey, CK_OBJECT_HANDLE hPrivateKey)
+{
+	// Test RSA OAEP with SHA-256 MGF1
+	CK_RSA_PKCS_OAEP_PARAMS oaepParams = { CKM_SHA_1, CKG_MGF1_SHA256, CKZ_DATA_SPECIFIED, NULL_PTR, 0 };
+	CK_MECHANISM mechanism = { CKM_RSA_PKCS_OAEP, &oaepParams, sizeof(oaepParams) };
+	CK_BYTE plainText[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,0x0C, 0x0D, 0x0F };
+	CK_BYTE cipherText[256];
+	CK_ULONG ulCipherTextLen;
+	CK_BYTE recoveredText[256];
+	CK_ULONG ulRecoveredTextLen;
+	CK_RV rv;
+
+	// Test encryption with SHA-256 MGF1
+	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
+	CPPUNIT_ASSERT(rv==CKR_OK);
+
+	ulCipherTextLen = sizeof(cipherText);
+	rv =CRYPTOKI_F_PTR( C_Encrypt(hSession,plainText,sizeof(plainText),cipherText,&ulCipherTextLen) );
+	CPPUNIT_ASSERT(rv==CKR_OK);
+
+	// Test decryption with SHA-256 MGF1
+	rv = CRYPTOKI_F_PTR( C_DecryptInit(hSession,&mechanism,hPrivateKey) );
+	CPPUNIT_ASSERT(rv==CKR_OK);
+
+	ulRecoveredTextLen = sizeof(recoveredText);
+	rv = CRYPTOKI_F_PTR( C_Decrypt(hSession,cipherText,ulCipherTextLen,recoveredText,&ulRecoveredTextLen) );
+	CPPUNIT_ASSERT(rv==CKR_OK);
+
+	// Verify that the recovered text matches the original
+	CPPUNIT_ASSERT(memcmp(plainText, &recoveredText[ulRecoveredTextLen-sizeof(plainText)], sizeof(plainText)) == 0);
+
+	// Test with SHA-256 as hash algorithm as well (combination of SHA-256 hash + SHA-256 MGF)
+	oaepParams.hashAlg = CKM_SHA256;
+	oaepParams.mgf = CKG_MGF1_SHA256;
+
+	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
+	CPPUNIT_ASSERT(rv==CKR_OK);
+
+	ulCipherTextLen = sizeof(cipherText);
+	rv =CRYPTOKI_F_PTR( C_Encrypt(hSession,plainText,sizeof(plainText),cipherText,&ulCipherTextLen) );
+	CPPUNIT_ASSERT(rv==CKR_OK);
+
+	rv = CRYPTOKI_F_PTR( C_DecryptInit(hSession,&mechanism,hPrivateKey) );
+	CPPUNIT_ASSERT(rv==CKR_OK);
+
+	ulRecoveredTextLen = sizeof(recoveredText);
+	rv = CRYPTOKI_F_PTR( C_Decrypt(hSession,cipherText,ulCipherTextLen,recoveredText,&ulRecoveredTextLen) );
+	CPPUNIT_ASSERT(rv==CKR_OK);
+
+	CPPUNIT_ASSERT(memcmp(plainText, &recoveredText[ulRecoveredTextLen-sizeof(plainText)], sizeof(plainText)) == 0);
+}
+
 // Check that RSA OAEP mechanism properly validates all input parameters
 void AsymEncryptDecryptTests::rsaOAEPParams(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPublicKey)
 {
@@ -140,7 +192,7 @@ void AsymEncryptDecryptTests::rsaOAEPParams(CK_SESSION_HANDLE hSession, CK_OBJEC
 	oaepParams.hashAlg = CKM_SHA_1;
 	oaepParams.mgf = CKG_MGF1_SHA256;
 	rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession,&mechanism,hPublicKey) );
-	CPPUNIT_ASSERT(rv==CKR_ARGUMENTS_BAD);
+	CPPUNIT_ASSERT(rv==CKR_OK); // SHA-256 MGF is now supported
 
 	oaepParams.mgf = CKG_MGF1_SHA1;
 	oaepParams.source = CKZ_DATA_SPECIFIED - 1;
@@ -201,4 +253,5 @@ void AsymEncryptDecryptTests::testRsaEncryptDecrypt()
 	rsaEncryptDecrypt(CKM_RSA_PKCS,hSessionRO,hPublicKey,hPrivateKey);
 	rsaEncryptDecrypt(CKM_RSA_X_509,hSessionRO,hPublicKey,hPrivateKey);
 	rsaEncryptDecrypt(CKM_RSA_PKCS_OAEP,hSessionRO,hPublicKey,hPrivateKey);
+	rsaOAEPSHA256(hSessionRO,hPublicKey,hPrivateKey);
 }
